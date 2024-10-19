@@ -1,0 +1,55 @@
+name: Firmware dumper
+
+on:
+  workflow_dispatch:
+    inputs:
+      link:
+        description: 'Direct Firmware Link'
+        required: true
+
+jobs:
+  extract-and-push:
+    runs-on: ubuntu-20.04
+
+    env:
+      DUMP_URL: ${{ github.event.inputs.link }}
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+      PUBLIC_SSH_KEY: ${{ secrets.PUBLIC_SSH }}
+      PRIVATE_SSH_KEY: ${{ secrets.PRIVATE_SSH }}
+
+    steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 512
+          swap-size-mb: 1024
+          overprovision-lvm: true
+          remove-dotnet: true
+          remove-android: true
+          remove-codeql: true
+          remove-haskell: true
+          remove-docker-images: true
+
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Run dumping firmware
+        run: |
+          git clone https://github.com/Kizziama/dumpyara
+          cd dumpyara
+          ./setup.sh
+          echo "${GITLAB_TOKEN}" > .gitlab_token
+          echo "${BOT_TOKEN}" > .tgtoken
+          git config --global user.name Kizziama
+          git config --global user.email kizziama@proton.me
+          mkdir -p ~/.ssh
+          ssh-keyscan -H github.com >> ~/.ssh/known_hosts
+          ssh-keyscan -H gitlab.com >> ~/.ssh/known_hosts
+          echo "${PRIVATE_SSH_KEY}" > ~/.ssh/id_ed25519
+          echo "${PUBLIC_SSH_KEY}" > ~/.ssh/id_ed25519.pub
+          chmod 600 ~/.ssh/id_ed25519
+          chmod 644 ~/.ssh/id_ed25519.pub
+          eval "$(ssh-agent -s)"
+          ssh-add ~/.ssh/id_ed25519
+          ./dumpyara.sh $DUMP_URL
