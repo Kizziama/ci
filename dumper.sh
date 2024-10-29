@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 
 [[ -z ${BOT_TOKEN} ]] && echo "BOT_TOKEN not defined, exiting!" && exit 1
-[[ -z ${GITLAB_SERVER} ]] && GITLAB_SERVER="gitlab.com"
-[[ -z $ORG ]] && ORG="hopireika-dumps"
+[[ -z $ORG ]] && ORG="Hopireika"
 [[ -z ${USE_ALT_DUMPER} ]] && USE_ALT_DUMPER="false"
 
 # Inform the user about final status of build
@@ -29,6 +28,15 @@ terminate() {
 	esac
 	exit 0
 }
+
+# GitHub token
+if [[ -n $2 ]]; then
+	GITHUB_TOKEN=$2
+elif [[ -f ".github_token" ]]; then
+	GITHUB_TOKEN=$(<.github_token)
+else
+	echo "GitHub token not found. Dumping just locally..."
+fi
 
 if echo "$1" | grep -E '^(https?|ftp)://.*$' >/dev/null; then
 	if echo "$1" | grep -q '1drv.ms'; then
@@ -612,11 +620,7 @@ if [ -z "$oplus_pipeline_key" ]; then
 else
 	branch=$(echo "$description"--"$oplus_pipeline_key" | head -1 | tr ' ' '-')
 fi
-
-repo_subgroup=$(echo "$brand" | tr '[:upper:]' '[:lower:]')
-[[ -z $repo_subgroup ]] && repo_subgroup=$(echo "$manufacturer" | tr '[:upper:]' '[:lower:]')
-repo_name=$(echo "$codename" | tr '[:upper:]' '[:lower:]')
-repo="$repo_subgroup/$repo_name"
+repo=$(echo "$brand"_"$codename"_dump | tr '[:upper:]' '[:lower:]')
 platform=$(echo "$platform" | tr '[:upper:]' '[:lower:]' | tr -dc '[:print:]' | tr '_' '-' | cut -c 1-35)
 top_codename=$(echo "$codename" | tr '[:upper:]' '[:lower:]' | tr -dc '[:print:]' | tr '_' '-' | cut -c 1-35)
 manufacturer=$(echo "$manufacturer" | tr '[:upper:]' '[:lower:]' | tr -dc '[:print:]' | tr '_' '-' | cut -c 1-35)
@@ -654,68 +658,85 @@ fi
 echo "[INFO] Generating 'all_files.txt'..."
 find . -type f ! -name all_files.txt -and ! -path "*/aosp-device-tree/*" -printf '%P\n' | sort | grep -v ".git/" >./all_files.txt
 
-# Check whether the subgroup exists or not
-if ! group_id_json="$(curl --compressed -sH --fail-with-body "Authorization: Bearer $DUMPER_TOKEN" "https://$GITLAB_SERVER/api/v4/groups/$ORG%2f$repo_subgroup")"; then
-	echo "Response: $group_id_json"
-	if ! group_id_json="$(curl --compressed -sH --fail-with-body "Authorization: Bearer $DUMPER_TOKEN" "https://$GITLAB_SERVER/api/v4/groups" -X POST -F name="${repo_subgroup^}" -F parent_id=64 -F path="${repo_subgroup}" -F visibility=public)"; then
-		echo "Creating subgroup for $repo_subgroup failed"
-		echo "Response: $group_id_json"
-	fi
+if [[ -n $GITHUB_TOKEN ]]; then
+	# Check if already dumped
+	curl --silent --fail "https://raw.githubusercontent.com/$ORG/$repo/$branch/all_files.txt" 2>/dev/null && echo "Firmware already dumped!" && exit 1
+
+	# Create repo
+	curl -s -X POST -H "Authorization: token ${GITHUB_TOKEN}" -d '{ "name": "'"$repo"'" }' "https://api.github.com/orgs/${ORG}/repos"
+	curl -s -X PUT -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github.mercy-preview+json" -d '{ "names": ["'"$manufacturer"'","'"$platform"'","'"$top_codename"'"]}' "https://api.github.com/repos/${ORG}/${repo}/topics"
+
+	# Add, commit, and push after filtering out certain files
+	git init --initial-branch "$branch"
+	git config user.name "Kizziama"
+	git config user.email "kizziama@proton"
+	git config http.postBuffer 157286400
+	git remote add origin https://github.com/$ORG/"${repo,,}".git
+
+	## Committing
+	echo "[INFO] Adding files and committing..."
+	GITPUSH=(git push https://"$GITHUB_TOKEN"@github.com/$ORG/"${repo,,}".git "$branch")
+	find . -size +97M -printf '%P\n' -o -name "*sensetime*" -printf '%P\n' -o -name "*.lic" -printf '%P\n' >|.gitignore
+	compressed_files=()
+	while IFS= read -r file_path; do
+		if [ -f "$file_path" ]; then
+			if [[ "$file_path" == *"$pattern"* ]]; then
+				compressed_file="${file_path}.xz"
+				zstd --ultra -22 --long -M512 -T0 --format=xz "$file_path" -o "$compressed_file"
+				file_size=$(du -b "$compressed_file" | cut -f1)
+				if [ "$file_size" -le $((99 * 1024 * 1024)) ]; then # 99M
+					compressed_files+=("$compressed_file")
+				else
+					rm -rf "${compressed_file}"
+				fi
+			fi
+		fi
+	done <.gitignore
+	printf '%s\n' "${compressed_files[@]}" >compressed_files.txt
+	cat >extract_files.sh <<'EOF'
+#!/bin/bash
+
+while IFS= read -r file; do
+    unzstd "$file"
+done < compressed_files.txt
+EOF
+	chmod +x extract_files.sh
+	git add --all
+	git commit -asm "Add ${description}"
+	git update-ref -d HEAD
+	git reset system/ vendor/ product/
+	git checkout -b "$branch"
+	git commit -asm "Add extras for ${description}" && "${GITPUSH[@]}"
+	git add vendor/
+	git commit -asm "Add vendor for ${description}" && "${GITPUSH[@]}"
+	git add system/system/app/ || git add system/app/
+	git commit -asm "Add system app for ${description}" && "${GITPUSH[@]}"
+	git add system/system/priv-app/ || git add system/priv-app/
+	git commit -asm "Add system priv-app for ${description}" && "${GITPUSH[@]}"
+	git add system/
+	git commit -asm "Add system for ${description}" && "${GITPUSH[@]}"
+	git add product/app/
+	git commit -asm "Add product app for ${description}" && "${GITPUSH[@]}"
+	git add product/priv-app/
+	git commit -asm "Add product priv-app for ${description}" && "${GITPUSH[@]}"
+	git add product/
+	git commit -asm "Add product for ${description}" && "${GITPUSH[@]}"
+else
+	echo "Dump done locally."
+	exit 1
 fi
 
-if ! group_id="$(jq '.id' -e <<<"${group_id_json}")"; then
-	echo "Unable to get gitlab group id"
-	terminate 1
-fi
-
-# Create the repo if it doesn't exist
-project_id_json="$(curl --compressed -sH "Authorization: bearer ${DUMPER_TOKEN}" "https://$GITLAB_SERVER/api/v4/projects/$ORG%2f$repo_subgroup%2f$repo_name")"
-if ! project_id="$(jq .id -e <<<"${project_id_json}")"; then
-	project_id_json="$(curl --compressed -sH "Authorization: bearer ${DUMPER_TOKEN}" "https://$GITLAB_SERVER/api/v4/projects" -X POST -F namespace_id="$group_id" -F name="$repo_name" -F visibility=public)"
-	if ! project_id="$(jq .id -e <<<"${project_id_json}")"; then
-		echo "Could get get project id"
-		terminate 1
-	fi
-fi
-
-branch_json="$(curl --compressed -sH "Authorization: bearer ${DUMPER_TOKEN}" "https://$GITLAB_SERVER/api/v4/projects/$project_id/repository/branches/$branch")"
-[[ "$(jq -r '.name' -e <<<"${branch_json}")" == "$branch" ]] && {
-	echo "$branch already exists in $repo"
-	terminate 2
-}
-
-# Add, commit, and push after filtering out certain files
-git init --initial-branch "$branch"
-git config user.name "Kizziama"
-git config user.email "kizziama@proton"
-
-## Committing
-echo "[INFO] Adding files and committing..."
-git add --ignore-errors -A >>/dev/null 2>&1
-git commit --quiet --signoff --message="$description" || {
-	echo "[ERROR] Committing failed!"
-	terminate 1
-}
-
-## Pushing
-echo "[INFO] Pushing..."
-git push "git@$GITLAB_SERVER:$ORG/$repo.git" HEAD:refs/heads/"$branch" || {
-	echo "[ERROR] Pushing failed!"
-	terminate 1
-}
-
-# Set default branch to the newly pushed branch
-curl --compressed -s -H "Authorization: bearer ${DUMPER_TOKEN}" "https://$GITLAB_SERVER/api/v4/projects/$project_id" -X PUT -F default_branch="$branch" >/dev/null
-
+if [[ -n "$BOT_TOKEN" ]]; then
 echo -e "[INFO] Sending Telegram notification"
 tg_html_text="<b>Brand</b>: <code>$brand</code>
 <b>Device</b>: <code>$codename</code>
 <b>Version</b>: <code>$release</code>
 <b>Fingerprint</b>: <code>$fingerprint</code>
 <b>Platform</b>: <code>$platform</code>
-[<a href=\"https://$GITLAB_SERVER/$ORG/$repo/tree/$branch/\">repo</a>] $link"
+[<a href=\"https://github.com/$ORG/$repo/tree/$branch/\">repo</a>] $link"
 
 # Send message to Telegram channel
 curl --compressed -s "https://api.telegram.org/bot${BOT_TOKEN}/sendmessage" --data "text=${tg_html_text}&chat_id=@hopireika_dump&parse_mode=HTML&disable_web_page_preview=True" >/dev/null
 
 terminate 0
+fi
