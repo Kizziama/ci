@@ -658,24 +658,35 @@ fi
 echo "[INFO] Generating 'all_files.txt'..."
 find . -type f ! -name all_files.txt -and ! -path "*/aosp-device-tree/*" -printf '%P\n' | sort | grep -v ".git/" >./all_files.txt
 
+# Generate README.md
+printf "# %s\n- manufacturer: %s\n- platform: %s\n- codename: %s\n- flavor: %s\n- release: %s\n- id: %s\n- incremental: %s\n- tags: %s\n- fingerprint: %s\n- is_ab: %s\n- brand: %s\n- branch: %s\n- repo: %s\n" "$description" "$manufacturer" "$platform" "$codename" "$flavor" "$release" "$id" "$incremental" "$tags" "$fingerprint" "$is_ab" "$brand" "$branch" "$repo" >./README.md
+cat ./README.md
+
 if [[ -n $GITHUB_TOKEN ]]; then
 	# Check if already dumped
 	curl --silent --fail "https://raw.githubusercontent.com/$ORG/$repo/$branch/all_files.txt" 2>/dev/null && echo "Firmware already dumped!" && exit 1
+
+	git config --global user.email kizziama@proton.me
+	git config --global user.name Kizziama
+	git config http.postBuffer 157286400
 
 	# Create repo
 	curl -s -X POST -H "Authorization: token ${GITHUB_TOKEN}" -d '{ "name": "'"$repo"'" }' "https://api.github.com/orgs/${ORG}/repos"
 	curl -s -X PUT -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github.mercy-preview+json" -d '{ "names": ["'"$manufacturer"'","'"$platform"'","'"$top_codename"'"]}' "https://api.github.com/repos/${ORG}/${repo}/topics"
 
-	# Add, commit, and push after filtering out certain files
-	git init --initial-branch "$branch"
-	git config user.name "Kizziama"
-	git config user.email "kizziama@proton"
-	git config http.postBuffer 157286400
-	git remote add origin https://github.com/$ORG/"${repo,,}".git
-
 	## Committing
 	echo "[INFO] Adding files and committing..."
-	GITPUSH=(git push https://"$GITHUB_TOKEN"@github.com/$ORG/"${repo,,}".git "$branch")
+	git init
+	git remote add origin https://github.com/$ORG/"${repo,,}".git
+	git checkout -b "$branch"
+
+	# Check if SSH keys are available
+	if ssh -T git@github.com 2>&1 | grep -q "successfully authenticated"; then
+		GITPUSH=(git push git@github.com:$ORG/"${repo,,}".git "$branch")
+	else
+		GITPUSH=(git push https://"$GITHUB_TOKEN"@github.com/$ORG/"${repo,,}".git "$branch")
+	fi
+
 	find . -size +97M -printf '%P\n' -o -name "*sensetime*" -printf '%P\n' -o -name "*.lic" -printf '%P\n' >|.gitignore
 	compressed_files=()
 	while IFS= read -r file_path; do
